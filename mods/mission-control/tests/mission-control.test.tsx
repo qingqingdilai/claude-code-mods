@@ -2,14 +2,14 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { edges, fit, importsOf, layout, svg, titleOf, wrap } from '../hooks/map'
 import { label, lines, summary } from '../hooks/tree'
-import { cap } from '../hooks/register'
+import { cap, browserCandidates } from '../hooks/register'
 
 let mockClock: any
 const PANE = { component: 'Pane', requestId: 'mission-control', props: { title: 'Mission Control', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 } } }
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 120 } }
 
 // Stands for the engine beneath the mod.
-function engine(on: any, opts: { noChrome?: boolean } = {}) {
+function engine(on: any, opts: { noChrome?: boolean; windows?: boolean } = {}) {
   const runs: string[][] = []
   const writes: Record<string, string> = {}
   on('session.start', (_$: any, e: any) => ({ sessionId: 's', cwd: e.cwd }))
@@ -23,13 +23,20 @@ function engine(on: any, opts: { noChrome?: boolean } = {}) {
   on('fs.read', (_$: any, e: any) => ({ value: e.path.endsWith('login.tsx') ? "import { start } from '../auth/session'\n" : '' }))
   on('fs.write', (_$: any, e: any) => ((writes[e.path] = e.text), { value: undefined }))
   on('fs.exists', () => ({ value: !opts.noChrome }))
-  on('env.get', () => ({ value: '/tmp/' }))
+  on('env.get', (_$: any, e: any) => ({ value: opts.windows && e.name === 'TEMP' ? 'C:/Temp/' : e.name === 'TMPDIR' ? '/tmp/' : null }))
   on('process.run', (_$: any, e: any) => (runs.push(e.argv), { value: { exitCode: 0, stdout: '', stderr: '' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.panes', () => ({ value: [{ id: 'mission-control', title: 'Mission Control', isShown: true, isFocused: true, isPlaced: true }] }))
   on('model.complete', () => ({ value: { isAnswered: true, text: '["tokens now expire after an hour"]', usage: { input_tokens: 1, output_tokens: 1 } } }))
   on('ui.render', ($: any, e: any) => $.ui.resolve(e).Text({ children: 'band below' }))
   return { runs, writes, clock }
+}
+
+// Where this run's map.svg lands: the mod builds it from its env, and a sandbox may
+// hand back Windows-flavoured paths (C:\tmp) even when asked for /tmp.
+function svgPathOf(writes: Record<string, string>) {
+  const keys = Object.keys(writes).filter(k => k.replace(/\\/g, '/').endsWith('/map.svg'))
+  return keys[0] ?? '/tmp/mission-control/map.svg'
 }
 
 describe('mission-control', () => {
@@ -159,15 +166,15 @@ describe('mission-control', () => {
     await $.turn.complete({ reason: 'answer', answer: 'done', durationMs: 1 } as any)
     await pane.press({ key: 'code' })
     await clock.advance(800) // the map draws a moment after a change
-    const map = writes['/tmp/mission-control/map.svg'] ?? ''
+    const map = writes[svgPathOf(writes)] ?? ''
     expect(map).toContain('login.tsx')
     expect(map).toContain('session.ts')
     expect(map).not.toContain('v2.png')
     expect(map).toContain('marker-end="url(#a)"') // the import arrow login → session
-    expect(runs.some(a => a[0] === 'sh' && a.includes('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'))).toBe(true)
+    expect(runs.some(a => a[0] === 'sh' && a.includes('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'))).toBe(true) // the macOS path is still first in line
     expect(await pane.find({ type: 'Image' })).toBeDefined()
     await clock.advance(800) // the "why" lines redraw the map
-    const drawn = writes['/tmp/mission-control/map.svg'] ?? ''
+    const drawn = writes[svgPathOf(writes)] ?? ''
     expect(drawn).toContain('tokens now expire') // the why, wrapped over two lines
     expect(drawn).toContain('after an hour')
     await pane.unmount()
@@ -181,5 +188,35 @@ describe('mission-control', () => {
     expect(await rowsAt(50)).toBe(30)
     expect(await rowsAt(60)).toBe(30)
     expect(summary([]).tools).toBe(0)
+  })
+
+  test('the code map finds a browser on every platform', () => {
+    const mac = browserCandidates('darwin')
+    expect(mac[0]).toBe('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome') // first, as before
+    expect(mac.some(p => p.includes('Chromium'))).toBe(true)
+    const win = browserCandidates('win32')
+    expect(win).toEqual([
+      'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    ])
+    expect(browserCandidates('linux').every(p => p.startsWith('/usr/bin/'))).toBe(true)
+  })
+
+  test('on Windows the code map uses PowerShell and %TEMP%', async ($, on) => {
+    const { runs, writes } = engine(on, { windows: true })
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/repo' } as any)
+    await $.turn.start({ text: 'go', turnId: 't1' } as any)
+    await $.command.run({ command: 'mission', args: 'code' } as any)
+    const pane = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...PANE } as any)
+    await $.tool.call({ tool: 'Read', file_path: '/repo/src/a.ts' } as any)
+    await mockClock.advance(800)
+    const ps = runs.find(a => a[0] === 'powershell.exe')
+    expect(ps).toBeDefined() // not sh
+    expect(runs.some(a => a[0] === 'sh')).toBe(false)
+    expect(ps?.join(' ')).toContain('Chrome/Application/chrome.exe') // the Windows Chrome path, via %TEMP%
+    expect(await pane.find({ type: 'Image' })).toBeDefined()
+    await pane.unmount()
   })
 })

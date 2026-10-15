@@ -11,10 +11,43 @@ import { importsOf, svg } from './map'
 import { label, lines, summary } from './tree'
 
 const PANE = 'mission-control'
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const MAX_NODES = 300
 const MAX_FILES = 14
 const BAND_AFTER_MS = 30_000 // the band stays this long after a turn ends
+
+// Candidate headless-browser binaries, in order of preference: Chrome first, then Edge.
+// The list depends only on the platform, so it is easy to test; `exists` filters it.
+export function browserCandidates(platform: NodeJS.Platform): string[] {
+  if (platform === 'darwin') {
+    return [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    ]
+  }
+  if (platform === 'win32') {
+    const roots = ['C:/Program Files', 'C:/Program Files (x86)']
+    return [
+      ...roots.map(r => `${r}/Google/Chrome/Application/chrome.exe`),
+      ...roots.map(r => `${r}/Microsoft/Edge/Application/msedge.exe`),
+    ]
+  }
+  return ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/microsoft-edge']
+}
+
+// The host's platform. `process` does not exist where the engine sandbox runs the mod,
+// so ask the environment instead: TEMP is set on Windows, TMPDIR on macOS and Linux.
+export async function platformOf($: EngineInterface): Promise<'win32' | 'darwin' | 'linux'> {
+  if ((await $.env.get('TEMP')) ?? (await $.env.get('TMP'))) return 'win32'
+  return (await $.env.get('TMPDIR')) ? 'darwin' : 'linux'
+}
+
+// The first candidate that exists; null when no known browser is installed.
+export async function findBrowser($: EngineInterface): Promise<string | null> {
+  for (const c of browserCandidates(await platformOf($))) if (await $.fs.exists(c)) return c
+  return null
+}
+
 // Tools that are Claude Code's own bookkeeping, not work: kept out of the tree.
 const INTERNAL = new Set(['SubagentHandback', 'ToolSearch', 'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList'])
 // Files that belong on a code map: source, config and docs, not images or binaries.
@@ -302,27 +335,47 @@ async function renderSoon($: EngineInterface) {
   })
 }
 
+// Headless Chrome writes the screenshot but does not always exit: wait for the file,
+// then close that Chrome (its own throwaway profile, never the person's browser).
+// POSIX shell on macOS and Linux; PowerShell on Windows, where `sh` and `pkill` do not exist.
+const SHOT_SH =
+  'mkdir -p "$(dirname "$2")"; rm -f "$2"; "$1" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 --no-first-run --no-default-browser-check ' +
+  '--user-data-dir="$3" --window-size="$4" --screenshot="$2" "$5" >/dev/null 2>&1 & pid=$!; ' +
+  'i=0; while [ ! -s "$2" ] && [ $i -lt 150 ]; do sleep 0.1; i=$((i+1)); done; sleep 0.2; pkill -P $pid 2>/dev/null; kill $pid 2>/dev/null; [ -s "$2" ]'
+const SHOT_PS = [
+  '$ErrorActionPreference = "SilentlyContinue"',
+  `$dir = Split-Path -Parent $args[2]`,
+  `if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }`,
+  `Remove-Item $args[2] -Force`,
+  `$chrome = Start-Process -FilePath $args[1] -ArgumentList @('--headless=new','--disable-gpu','--hide-scrollbars','--force-device-scale-factor=2','--no-first-run','--no-default-browser-check',("--user-data-dir=" + $args[3]),("--window-size=" + $args[4]),("--screenshot=" + $args[2]),$args[5]) -PassThru`,
+  `$sw = [System.Diagnostics.Stopwatch]::StartNew()`,
+  `while ((-not (Test-Path $args[2]) -or (Get-Item $args[2]).Length -eq 0) -and $sw.ElapsedMilliseconds -lt 15000) { Start-Sleep -Milliseconds 100 }`,
+  `Start-Sleep -Milliseconds 200`,
+  `Stop-Process -Id $chrome.Id -Force`,
+  `if (Test-Path $args[2]) { exit 0 } else { exit 1 }`,
+].join(';\n')
+
 async function renderMap($: EngineInterface) {
-  if (!(await $.fs.exists(CHROME))) {
-    draw.error = `The code map needs Google Chrome at ${CHROME}.`
+  const plat = await platformOf($)
+  const chrome = await findBrowser($)
+  if (!chrome) {
+    draw.error = `The code map needs Google Chrome or Microsoft Edge${plat === 'win32' ? '' : ' (Chromium works too)'}.`
     await update($, now, () => Date.now()) // redraw the pane with the message
     return
   }
   draw.error = ''
-  const tmp = ((await $.env.get('TMPDIR')) ?? '/tmp').replace(/\/$/, '')
-  const dir = `${tmp}/mission-control`
+  const tmp = plat === 'win32'
+    ? ((await $.env.get('TEMP')) ?? (await $.env.get('TMP')) ?? 'C:/Temp')
+    : (await $.env.get('TMPDIR')) ?? '/tmp'
+  const dir = `${tmp.replace(/\/+$/, '')}/mission-control`
   const n = ++draw.n
   const width = Math.round(draw.size.columns * 9)
   const height = Math.round(draw.size.rows * 19)
   const svgPath = `${dir}/map.svg`
   const png = `${dir}/map-${n % 2}.png` // two files in turn, so the shown one is never half written
   await $.fs.write(svgPath, svg(await read($, files), { width, height, at: Date.now(), turn: await read($, turn) }))
-  // Headless Chrome writes the screenshot but does not always exit: wait for the file,
-  // then close that Chrome (its own throwaway profile, never the person's browser).
-  const script =
-    'mkdir -p "$(dirname "$2")"; rm -f "$2"; "$1" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 --no-first-run --no-default-browser-check ' +
-    '--user-data-dir="$3" --window-size="$4" --screenshot="$2" "$5" >/dev/null 2>&1 & pid=$!; ' +
-    'i=0; while [ ! -s "$2" ] && [ $i -lt 150 ]; do sleep 0.1; i=$((i+1)); done; sleep 0.2; pkill -P $pid 2>/dev/null; kill $pid 2>/dev/null; [ -s "$2" ]'
-  const r = await $.process.run(['sh', '-c', script, 'mission-control', CHROME, png, `${dir}/chrome`, `${width},${height}`, `file://${encodeURI(svgPath)}`], { timeoutMs: 20_000 })
+  const r = plat === 'win32'
+    ? await $.process.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', SHOT_PS, chrome, png, `${dir}/chrome`, `${width},${height}`, `file:///${svgPath.replace(/\\/g, '/').replace(/^\/?/, '')}`], { timeoutMs: 20_000 })
+    : await $.process.run(['sh', '-c', SHOT_SH, chrome, png, `${dir}/chrome`, `${width},${height}`, `file://${encodeURI(svgPath)}`], { timeoutMs: 20_000 })
   if (r.exitCode === 0) await update($, frame, () => ({ file: png, n }))
 }
