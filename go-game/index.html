@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Go</title>
+<style>
+:root{
+  --bg:#efe8d6; --surface:#f7f2e4; --ink:#2a2622; --ink-soft:#6b6157;
+  --line:#8a7f6d; --wood-1:#e9c886; --wood-2:#d9ab5f;
+  --accent:#8c2f2f;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#141518; --surface:#1d1f24; --ink:#e8e4da; --ink-soft:#9a978f;
+  --line:#4a4d55; --wood-1:#3a3f47; --wood-2:#2a2e35;
+  --accent:#e05545;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#141518; --surface:#1d1f24; --ink:#e8e4da; --ink-soft:#9a978f;
+  --line:#4a4d55; --wood-1:#3a3f47; --wood-2:#2a2e35;
+  --accent:#e05545;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.5 "Segoe UI",system-ui,sans-serif;
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px 12px}
+#board{background:radial-gradient(circle at 35% 30%,var(--wood-1),var(--wood-2));
+  border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.25);touch-action:none;cursor:crosshair;
+  margin:0 8px}
+#boardWrap{width:100%;display:flex;justify-content:center}
+#status{margin:14px 0 4px;font-weight:600;text-align:center;min-height:1.4em;max-width:600px}
+#captures{display:flex;gap:24px;margin:2px 0 14px;color:var(--ink-soft);
+  flex-wrap:wrap;justify-content:center;align-items:center}
+#captures b{color:var(--ink);font-variant-numeric:tabular-nums}
+.shelf{display:inline-flex;gap:3px;align-items:center;margin-left:4px}
+.shelf .dot{width:9px;height:9px;border-radius:50%}
+.dot.b{background:#111;border:1px solid #555}
+.dot.w{background:#f5f2e8;border:1px solid #999}
+.shelf .more{font-size:12px;margin-left:2px}
+#controls{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;max-width:560px}
+button,.opt{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);
+  border-radius:8px;padding:7px 12px;cursor:pointer;transition:background .15s}
+button:hover,.opt:hover{background:var(--line);color:var(--bg)}
+button:focus-visible,.opt:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button.primary:hover{opacity:.85;background:var(--accent)}
+.opt[aria-pressed="true"]{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+.setup{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;align-items:center;margin-top:14px;color:var(--ink-soft)}
+.chip{font:inherit;background:var(--surface);border:1px solid var(--line);border-radius:6px;
+  padding:2px 8px;cursor:pointer;color:var(--ink)}
+.chip.on{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+.chip.disabled{opacity:.45;cursor:default}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+  background:var(--ink);color:var(--bg);padding:9px 18px;border-radius:8px;
+  opacity:0;transition:opacity .3s;pointer-events:none;max-width:90vw;text-align:center}
+#toast.show{opacity:1}
+#rules{margin-top:18px;color:var(--ink-soft);max-width:480px;text-align:center;font-size:13.5px}
+#rules code{background:var(--surface);padding:1px 5px;border-radius:4px;font-size:12.5px}
+@media (max-width:480px){
+  #board{margin:0}
+  #captures{gap:14px}
+  #controls{gap:6px}
+  #controls button{padding:6px 9px}
+}
+</style>
+</head>
+<body>
+<div id="boardWrap"><canvas id="board" width="540" height="540" aria-label="Go board"></canvas></div>
+<div id="status"></div>
+<div id="captures"></div>
+<div id="controls">
+  <button id="undo" class="primary">Undo</button>
+  <button id="pass">Pass</button>
+  <button id="new">New game</button>
+  <span class="opt" id="theme" role="button" tabindex="0" aria-pressed="false" title="Toggle dark theme">◐ Theme</span>
+</div>
+<div class="setup">
+  Board <span id="sizes" style="display:inline-flex;gap:4px"></span>
+  · Komi <span id="komiOpts" style="display:inline-flex;gap:4px"></span>
+  · AI <span id="aiOpts" style="display:inline-flex;gap:4px"></span>
+</div>
+<div id="toast" role="status"></div>
+<div id="rules">
+  Capture groups that lose their last <em>liberty</em>.
+  Don't repeat a whole board position (superko) and don't recreate the single point lost one move ago (ko).
+  When both pass, territory wins: <code>territory − captures + komi</code>.
+  AI plays <em>Black</em>; you play White.
+</div>
+<script src="go-rules.js"></script>
+<script src="go-ai.js"></script>
+<script>
+"use strict";
+
+const EMPTY = 0, BLACK = 1, WHITE = 2;
+// shared rules module (groupAtIn/keyOf/simulateMove); falls back to the inline
+// copies below when go-rules.js fails to load — core logic must never break the game
+const GoRules = (typeof window !== "undefined" && window.GoRules) || null;
+if (!GoRules) console.warn("go-rules.js failed to load — using built-in rule fallback");
+const SIZES = [9, 13, 19], KOMIS = [5, 7.5, 10];
+
+const $ = id => document.getElementById(id);
+const statusEl = $("status"), toastEl = $("toast"), capEl = $("captures");
+const boardCanvas = $("board"), ctx = boardCanvas.getContext("2d");
+
+let currentSize = parseInt(localStorage.getItem("go.size") || "9", 10);
+if (!SIZES.includes(currentSize)) currentSize = 9;
+let komi = parseFloat(localStorage.getItem("go.komi") || "7.5");
+if (!KOMIS.includes(komi)) komi = 7.5;
+
+let board, lastMove, toMove, history, passed, over, captures;
+const positionSet = new Set();
+
+function emptyBoard() {
+  return Array.from({ length: currentSize }, () => Array(currentSize).fill(EMPTY));
+}
+function keyOf(b, cb, cw) {
+  return b.map(r => r.map(v => v === BLACK ? "B" : v === WHITE ? "W" : ".").join("")).join("") + "|" + cb + "|" + cw;
+}
+function undoStackKey() { return keyOf(board, captures[BLACK], captures[WHITE]); }
+function snapshot() {
+  return {
+    board: board.map(r => r.slice()),
+    lastMove, toMove, passed, over,
+    captures: { ...captures }
+  };
+}
+
+function newGame() {
+  board = emptyBoard();
+  lastMove = -1; toMove = BLACK; history = [];
+  passed = 0; over = false;
+  captures = { [BLACK]: 0, [WHITE]: 0 };
+  positionSet.clear();
+  positionSet.add(undoStackKey());
+  status("New game · " + currentSize + "×" + currentSize + " · komi " + komi + " · Black to play");
+  draw();
+  armAiMove(); // AI opens black's first move when a mode is on
+}
+
+/* ---------- groups & liberties (fallback copies used only when go-rules.js is absent) ---------- */
+function groupAtIn(b, x, y) {
+  const n = currentSize;
+  if (x < 0 || y < 0 || x >= n || y >= n) return null;
+  if (b[y][x] === EMPTY) return null;
+  const color = b[y][x];
+  const stack = [[x, y]], seen = new Set([y * n + x]), libs = new Set();
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+      const id = ny * n + nx;
+      if (b[ny][nx] === EMPTY) libs.add(id);
+      else if (b[ny][nx] === color && !seen.has(id)) { seen.add(id); stack.push([nx, ny]); }
+    }
+  }
+  return { color, cells: [...seen], libs: libs.size };
+}
+
+/* Place a stone at (x,y). Returns {ok, captured, ko} or {ok:false, reason}. */
+function placeStone(x, y) {
+  if (over) return { ok: false, reason: "gameover" };
+  const res = GoRules
+    ? GoRules.simulateMove(board, currentSize, toMove, captures, positionSet, x, y)
+    : simulateMoveFallback(x, y);
+  if (!res.ok) return res;
+  // ko flag for display: captured exactly one stone and landed on the just-vacated point
+  let ko = false;
+  if (res.captured === 1 && lastMove !== -1) {
+    const lx = lastMove % currentSize, ly = Math.floor(lastMove / currentSize);
+    if (x === lx && y === ly) ko = true;
+  }
+  return { ok: true, captured: res.captured, ko, board: res.board };
+}
+
+// old hand-rolled dry-run kept verbatim as the fallback when GoRules is missing
+function simulateMoveFallback(x, y) {
+  if (board[y][x] !== EMPTY) return { ok: false, reason: "occupied" };
+  const color = toMove, opp = 3 - color;
+  // dry run on a copy so the real board stays untouched on illegal moves
+  const copy = board.map(r => r.slice());
+  copy[y][x] = color;
+  // capture adjacent enemy groups with zero liberties
+  let captured = 0;
+  const seenCap = new Set();
+  for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= currentSize || ny >= currentSize) continue;
+    if (copy[ny][nx] !== opp) continue;
+    const g = groupAtIn(copy, nx, ny);
+    if (g.libs === 0) {
+      const gkey = g.cells.join(",");
+      if (seenCap.has(gkey)) continue;
+      seenCap.add(gkey);
+      for (const c of g.cells) {
+        const ry = Math.floor(c / currentSize), rx = c % currentSize;
+        copy[ry][rx] = EMPTY;
+      }
+      captured += g.cells.length;
+    }
+  }
+  // suicide check: our own group must still have a liberty if nothing was captured
+  const self = groupAtIn(copy, x, y);
+  if (self.libs === 0 && captured === 0) {
+    return { ok: false, reason: "suicide" };
+  }
+  // superko: position plus capture counts must be new
+  const key = keyOf(copy, captures[BLACK] + captured, captures[WHITE]);
+  if (positionSet.has(key)) {
+    return { ok: false, reason: "repeat" };
+  }
+  return { ok: true, captured, board: copy };
+}
+
+function commit(x, y, result) {
+  const pre = snapshot();   // capture pre-move state
+  board = result.board;     // apply the validated post-move board
+  lastMove = y * currentSize + x;
+  captures[toMove] += result.captured;
+  positionSet.add(undoStackKey());
+  passed = 0;
+  toMove = 3 - toMove;
+  history.push({ snap: pre, x, y });
+  status("Move " + history.length +
+    (result.ko ? " · ko" : "") +
+    (result.captured ? " · captured " + result.captured : "") +
+    " · " + (toMove === BLACK ? "Black" : "White") + " to play");
+  draw();
+  // AI plays BLACK: after a human (white) move the reply gets scheduled
+  if (toMove === BLACK) armAiMove();
+}
+
+function onPass() {
+  if (over) return;
+  history.push({ snap: snapshot(), x: -1, y: -1 });
+  passed++;
+  positionSet.add(undoStackKey());
+  const p = toMove;
+  toMove = 3 - toMove;
+  if (passed >= 2) {
+    over = true;
+    cancelAiMove();
+    scoreGame();
+  } else {
+    status((p === BLACK ? "Black" : "White") + " passed · " +
+      (toMove === BLACK ? "Black" : "White") + " to play");
+  }
+  draw();
+  if (toMove === BLACK && !over) armAiMove();
+}
+
+function undo() {
+  cancelAiMove(); // undo can land back on an AI (black) turn: re-arm below
+  if (over) { toast("Game over — start a new game"); return; }
+  if (!history.length) { toast("Nothing to undo"); return; }
+  const last = history.pop();
+  const s = last.snap;
+  board = s.board; lastMove = s.lastMove; toMove = s.toMove;
+  passed = s.passed; over = s.over; captures = s.captures;
+  status(history.length
+    ? "Move " + history.length + " · " + (toMove === BLACK ? "Black" : "White") + " to play"
+    : "Fresh board · Black to play");
+  draw();
+  if (toMove === BLACK) armAiMove();
+}
+
+/* ---------- loose territory scoring for a casual game ---------- */
+function findTerritory(x, y) {
+  // flood fill an empty region; owner = the single color bordering it
+  const n = currentSize;
+  const stack = [[x, y]], seen = new Set([y * n + x]), border = new Set(), cells = [];
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    cells.push(cy * n + cx);
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+      const id = ny * n + nx;
+      if (board[ny][nx] !== EMPTY) border.add(board[ny][nx]);
+      else if (!seen.has(id)) { seen.add(id); stack.push([nx, ny]); }
+    }
+  }
+  return { owner: border.size === 1 ? [...border][0] : EMPTY, cells };
+}
+
+function scoreGame() {
+  const score = { [BLACK]: -komi, [WHITE]: 0 };
+  const visited = new Set();
+  for (let y = 0; y < currentSize; y++) for (let x = 0; x < currentSize; x++) {
+    if (board[y][x] !== EMPTY || visited.has(y * currentSize + x)) continue;
+    const g = findTerritory(x, y);
+    for (const c of g.cells) visited.add(c);
+    if (g.owner !== EMPTY) score[g.owner] += g.cells.length;
+  }
+  for (let y = 0; y < currentSize; y++) for (let x = 0; x < currentSize; x++) {
+    if (board[y][x] !== EMPTY) score[board[y][x]]++;
+  }
+  score[BLACK] += captures[WHITE];
+  score[WHITE] += captures[BLACK];
+  const diff = Math.round((score[BLACK] - score[WHITE]) * 2) / 2;
+  const winner = diff > 0 ? "Black" : diff < 0 ? "White" : "Even";
+  status("Game over · " + winner + " by " + Math.abs(diff) +
+    "  ·  B " + Math.round(score[BLACK] * 2) / 2 + "  W " + Math.round(score[WHITE] * 2) / 2 +
+    "  (komi " + komi + ")");
+}
+
+/* ---------- ghost hover & cheap legality ---------- */
+let hoverXY = null;
+function hoverLegal(x, y) {
+  // fast screen: occupied / suicide / immediate capture — ko stays to placeStone
+  if (board[y][x] !== EMPTY) return false;
+  const color = toMove, opp = 3 - color;
+  let cap = false, hasLib = false;
+  for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= currentSize || ny >= currentSize) continue;
+    const v = board[ny][nx];
+    if (v === EMPTY) { hasLib = true; break; }
+    if (v === opp && groupAtIn(board, nx, ny).libs === 1) cap = true;
+  }
+  if (cap) return true;
+  // no adjacent enemy group can be captured: our group needs a liberty
+  for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= currentSize || ny >= currentSize) continue;
+    if (board[ny][nx] === color && groupAtIn(board, nx, ny).libs > 1) { hasLib = true; break; }
+  }
+  return hasLib;
+}
+
+/* ---------- rendering ---------- */
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";
+}
+
+function resize() {
+  const css = Math.min(540, Math.max(280, Math.floor(window.innerWidth * 0.88)));
+  const dpr = window.devicePixelRatio || 1;
+  boardCanvas.style.width = css + "px";
+  boardCanvas.style.height = css + "px";
+  boardCanvas.width = css * dpr;
+  boardCanvas.height = css * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+function draw() {
+  if (!board) return;
+  const css = parseInt(boardCanvas.style.width) || 540;
+  const N = currentSize;
+  const margin = css * 0.055;
+  const cell = (css - 2 * margin) / (N - 1);
+  const px = i => margin + i * cell;
+  const lineColor = cssVar("--line");
+
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = Math.max(1, cell * 0.022);
+  for (let i = 0; i < N; i++) {
+    ctx.beginPath(); ctx.moveTo(px(i), px(0)); ctx.lineTo(px(i), px(N - 1)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px(0), px(i)); ctx.lineTo(px(N - 1), px(i)); ctx.stroke();
+  }
+  const stars = N === 19 ? [3, 9, 15] : N === 13 ? [3, 6, 9] : [2, 4, 6];
+  ctx.fillStyle = lineColor;
+  for (const sx of stars) for (const sy of stars) {
+    ctx.beginPath(); ctx.arc(px(sx), px(sy), cell * 0.09, 0, 7); ctx.fill();
+  }
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const v = board[y][x];
+    if (v === EMPTY) continue;
+    const cx = px(x), cy = px(y);
+    const r = cell * 0.44;
+    const grad = ctx.createRadialGradient(cx - r * .3, cy - r * .3, r * .1, cx, cy, r);
+    if (v === BLACK) { grad.addColorStop(0, "#555"); grad.addColorStop(1, "#000"); }
+    else { grad.addColorStop(0, "#fff"); grad.addColorStop(1, "#ccc"); }
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.fill();
+    ctx.strokeStyle = v === BLACK ? "rgba(0,0,0,.6)" : "rgba(0,0,0,.35)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  if (lastMove !== -1 && !over) {
+    const lx = lastMove % N, ly = Math.floor(lastMove / N);
+    const c = board[ly][lx];
+    if (c !== EMPTY) {
+      ctx.strokeStyle = c === BLACK ? "#fff" : "#000";
+      ctx.lineWidth = Math.max(1.5, cell * 0.05);
+      ctx.beginPath(); ctx.arc(px(lx), px(ly), cell * 0.22, 0, 7); ctx.stroke();
+    }
+  }
+  // ghost stone on hover, or a subtle ring when the point is illegal
+  if (hoverXY && !over && board[hoverXY[1]][hoverXY[0]] === EMPTY) {
+    const [hx, hy] = hoverXY;
+    const gx = px(hx), gy = px(hy);
+    if (hoverLegal(hx, hy)) {
+      const gr = cell * 0.40;
+      const grad = ctx.createRadialGradient(gx - gr * .3, gy - gr * .3, gr * .1, gx, gy, gr);
+      if (toMove === BLACK) { grad.addColorStop(0, "#555"); grad.addColorStop(1, "#000"); }
+      else { grad.addColorStop(0, "#fff"); grad.addColorStop(1, "#ccc"); }
+      ctx.globalAlpha = 0.45;
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(gx, gy, gr, 0, 7); ctx.fill();
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.strokeStyle = "rgba(140,60,60,.55)";
+      ctx.lineWidth = Math.max(1.5, cell * 0.05);
+      ctx.beginPath(); ctx.arc(gx, gy, cell * 0.30, 0, 7); ctx.stroke();
+    }
+  }
+  // coordinate labels: columns A-T (skip I), rows N-1..1
+  ctx.fillStyle = cssVar("--ink-soft");
+  ctx.font = Math.round(cell * 0.28) + "px 'Segoe UI', system-ui, sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const letters = "ABCDEFGHJKLMNOPQRSTU";
+  for (let i = 0; i < N; i++) {
+    ctx.fillText(letters[i], px(i), px(N - 1) + cell * 0.75);
+    ctx.fillText(String(N - i), px(0) - cell * 0.75, px(i));
+  }
+  updateCaptures();
+}
+
+function updateCaptures() {
+  // dots: black's captures as white dots, white's captures as black dots; last 8 + "+N"
+  const dots = (n, cls) => {
+    const shown = Math.min(n, 8);
+    let h = "<span class=\"shelf\" title=\"last captured stones\">";
+    for (let i = 0; i < shown; i++) h += "<i class=\"dot " + cls + "\"></i>";
+    if (n > 8) h += "<span class=\"more\">+" + (n - 8) + "</span>";
+    return h + "</span>";
+  };
+  capEl.innerHTML = "Black captured <b>" + captures[WHITE] + "</b>" + dots(captures[WHITE], "w") +
+    " · White captured <b>" + captures[BLACK] + "</b>" + dots(captures[BLACK], "b");
+}
+
+/* ---------- toast ---------- */
+let toastTimer;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2200);
+}
+function status(msg) { statusEl.textContent = msg; }
+
+/* ---------- input ---------- */
+boardCanvas.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  cancelAiMove();
+  const rect = boardCanvas.getBoundingClientRect();
+  const css = rect.width;
+  const N = currentSize;
+  const margin = css * 0.055;
+  const cell = (css - 2 * margin) / (N - 1);
+  const x = Math.round((e.clientX - rect.left - margin) / cell);
+  const y = Math.round((e.clientY - rect.top - margin) / cell);
+  if (x < 0 || y < 0 || x >= N || y >= N) return;
+  const res = placeStone(x, y);
+  if (!res.ok) {
+    if (res.reason === "occupied") toast("That point is occupied");
+    else if (res.reason === "suicide") toast("Suicide is illegal");
+    else if (res.reason === "repeat") toast("Illegal: this repeats a previous position (ko/superko)");
+    else if (res.reason === "gameover") toast("Game over — pass or start a new game");
+    return;
+  }
+  commit(x, y, res);
+});
+
+function pointFromEvent(e) {
+  const rect = boardCanvas.getBoundingClientRect();
+  const css = rect.width;
+  const N = currentSize;
+  const margin = css * 0.055;
+  const cell = (css - 2 * margin) / (N - 1);
+  const x = Math.round((e.clientX - rect.left - margin) / cell);
+  const y = Math.round((e.clientY - rect.top - margin) / cell);
+  return (x < 0 || y < 0 || x >= N || y >= N) ? null : [x, y];
+}
+boardCanvas.addEventListener("pointermove", e => {
+  const p = pointFromEvent(e);
+  const same = p && hoverXY && p[0] === hoverXY[0] && p[1] === hoverXY[1];
+  hoverXY = p;
+  if (!same) draw();
+});
+boardCanvas.addEventListener("pointerleave", () => {
+  if (hoverXY) { hoverXY = null; draw(); }
+});
+
+/* ---------- AI chips (Off / Greedy / Minimax — AI always plays BLACK) ---------- */
+let aiMode = localStorage.getItem("go.ai") || "off";
+if (!["off", "greedy", "minimax2"].includes(aiMode)) aiMode = "off";
+let aiTimer = null, aiThinking = false;
+function aiAvailable() { return !!(typeof window !== "undefined" && window.GoAI); }
+function cancelAiMove() {
+  if (aiTimer) { clearTimeout(aiTimer); aiTimer = null; }
+  aiThinking = false;
+}
+function armAiMove() {
+  // schedule AI (BLACK's) reply ~600ms later; re-verify conditions when it fires
+  cancelAiMove();
+  if (aiMode === "off" || !aiAvailable() || over) return;
+  aiTimer = setTimeout(runAiMove, 600);
+}
+function runAiMove() {
+  aiTimer = null;
+  // the timer only fires if a human action hasn't cleared it first
+  if (aiMode === "off" || !aiAvailable() || toMove !== BLACK || over) return;
+  const AI = window.GoAI;
+  const state = { board, size: currentSize, toMove, captures, positionSet };
+  let decision;
+  try { decision = AI.choosePassOrMove(state, aiMode); } catch (e) { toast("AI move failed"); return; }
+  aiThinking = true;
+  if (decision.pass) {
+    onPass();
+  } else {
+    const res = placeStone(decision.move[0], decision.move[1]);
+    if (res.ok) commit(decision.move[0], decision.move[1], res);
+    else {
+      // invariant: decision.move always comes from getLegalMoves, so res.ok
+      // should never be false here — reaching this means a real rule
+      // disagreement between the AI's chosen move and placeStone. Surface it
+      // instead of silently ending the game via a pass.
+      toast("AI move rejected by rules");
+      onPass();
+    }
+  }
+  aiThinking = false;
+}
+
+/* ---------- setup chips ---------- */
+function buildChips() {
+  const sEl = $("sizes"), kEl = $("komiOpts");
+  SIZES.forEach(v => {
+    const b = document.createElement("button");
+    b.textContent = v;
+    b.className = "chip" + (v === currentSize ? " on" : "");
+    b.dataset.group = "size";
+    b.addEventListener("click", () => {
+      currentSize = v;
+      localStorage.setItem("go.size", String(v));
+      markChips(); newGame(); resize();
+    });
+    sEl.appendChild(b);
+  });
+  KOMIS.forEach(v => {
+    const b = document.createElement("button");
+    b.textContent = v;
+    b.className = "chip" + (v === komi ? " on" : "");
+    b.dataset.group = "komi";
+    b.addEventListener("click", () => {
+      komi = v;
+      localStorage.setItem("go.komi", String(v));
+      markChips(); newGame();
+    });
+  kEl.appendChild(b);
+  });
+  // AI chips: Off / Greedy / Minimax — a mode chip means the AI takes over BLACK
+  const aEl = $("aiOpts");
+  [["off", "Off"], ["greedy", "Greedy"], ["minimax2", "Minimax"]].forEach(([v, label]) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = "chip" + (v === aiMode ? " on" : "");
+    b.dataset.group = "ai";
+    b.dataset.value = v;
+    b.addEventListener("click", () => {
+      if (!aiAvailable()) { toast("AI module failed to load"); return; }
+      cancelAiMove();
+      aiMode = v;
+      localStorage.setItem("go.ai", v);
+      markChips();
+      armAiMove(); // e.g. undo left it black's turn: AI jumps in
+    });
+    aEl.appendChild(b);
+  });
+  if (!aiAvailable()) {
+    // module didn't load: chips stay inert, clicking surfaces the toast
+    aEl.querySelectorAll(".chip").forEach(b => b.classList.add("disabled"));
+  }
+}
+function markChips() {
+  document.querySelectorAll(".chip").forEach(b => {
+    const active = b.dataset.group === "size"
+      ? b.textContent == currentSize
+      : b.dataset.group === "ai"
+      ? b.dataset.value === aiMode
+      : parseFloat(b.textContent) == komi;
+    b.classList.toggle("on", active);
+  });
+}
+
+/* ---------- buttons ---------- */
+$("undo").addEventListener("click", undo);
+$("pass").addEventListener("click", onPass);
+$("new").addEventListener("click", newGame);
+$("theme").addEventListener("click", applyTheme);
+$("theme").addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === " ") applyTheme();
+});
+function applyTheme() {
+  const el = $("theme");
+  const dark = el.getAttribute("aria-pressed") !== "true";
+  el.setAttribute("aria-pressed", dark ? "true" : "false");
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  localStorage.setItem("go.theme", dark ? "1" : "");
+  draw();
+}
+if (localStorage.getItem("go.theme") === "1") $("theme").setAttribute("aria-pressed", "true");
+
+document.addEventListener("keydown", e => {
+  if (e.key.toLowerCase() === "z" && !e.repeat) {
+    e.preventDefault();
+    undo();
+    return;
+  }
+  if (e.key === "Escape" && hoverXY) { hoverXY = null; draw(); }
+});
+window.addEventListener("resize", resize);
+
+buildChips();
+newGame();
+resize();
+</script>
+</body>
+</html>
