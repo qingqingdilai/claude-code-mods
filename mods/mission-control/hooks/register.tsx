@@ -337,23 +337,28 @@ async function renderSoon($: EngineInterface) {
 
 // Headless Chrome writes the screenshot but does not always exit: wait for the file,
 // then close that Chrome (its own throwaway profile, never the person's browser).
-// POSIX shell on macOS and Linux; PowerShell on Windows, where `sh` and `pkill` do not exist.
+// POSIX shell on macOS and Linux; a PowerShell script file on Windows, where `sh`
+// and `pkill` do not exist. `-File` is used (not `-Command`) because only `-File`
+// passes positional arguments into `$args` inside the script.
 const SHOT_SH =
   'mkdir -p "$(dirname "$2")"; rm -f "$2"; "$1" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 --no-first-run --no-default-browser-check ' +
   '--user-data-dir="$3" --window-size="$4" --screenshot="$2" "$5" >/dev/null 2>&1 & pid=$!; ' +
   'i=0; while [ ! -s "$2" ] && [ $i -lt 150 ]; do sleep 0.1; i=$((i+1)); done; sleep 0.2; pkill -P $pid 2>/dev/null; kill $pid 2>/dev/null; [ -s "$2" ]'
 const SHOT_PS = [
   '$ErrorActionPreference = "SilentlyContinue"',
-  `$dir = Split-Path -Parent $args[2]`,
-  `if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }`,
-  `Remove-Item $args[2] -Force`,
-  `$chrome = Start-Process -FilePath $args[1] -ArgumentList @('--headless=new','--disable-gpu','--hide-scrollbars','--force-device-scale-factor=2','--no-first-run','--no-default-browser-check',("--user-data-dir=" + $args[3]),("--window-size=" + $args[4]),("--screenshot=" + $args[2]),$args[5]) -PassThru`,
-  `$sw = [System.Diagnostics.Stopwatch]::StartNew()`,
-  `while ((-not (Test-Path $args[2]) -or (Get-Item $args[2]).Length -eq 0) -and $sw.ElapsedMilliseconds -lt 15000) { Start-Sleep -Milliseconds 100 }`,
-  `Start-Sleep -Milliseconds 200`,
-  `Stop-Process -Id $chrome.Id -Force`,
-  `if (Test-Path $args[2]) { exit 0 } else { exit 1 }`,
-].join(';\n')
+  '$dir = Split-Path -Parent $args[2]',
+  'if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }',
+  'Remove-Item $args[2] -Force',
+  // A single argument string, not an array: Start-Process splits arrays on
+  // whitespace, which breaks `--screenshot=C:\path with space` into two tokens.
+  "$argStr = '--headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 --no-first-run --no-default-browser-check --user-data-dir=\"' + $args[3] + '\" --window-size=' + $args[4] + ' --screenshot=\"' + $args[2] + '\" \"' + $args[5] + '\"'",
+  '$p = Start-Process -FilePath $args[1] -ArgumentList $argStr -PassThru',
+  '$sw = [System.Diagnostics.Stopwatch]::StartNew()',
+  'while ((-not (Test-Path $args[2]) -or (Get-Item $args[2]).Length -eq 0) -and $sw.ElapsedMilliseconds -lt 15000) { Start-Sleep -Milliseconds 100 }',
+  'Start-Sleep -Milliseconds 200',
+  'if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }',
+  'if (Test-Path $args[2]) { exit 0 } else { exit 1 }',
+].join('\r\n')
 
 async function renderMap($: EngineInterface) {
   const plat = await platformOf($)
@@ -373,9 +378,23 @@ async function renderMap($: EngineInterface) {
   const height = Math.round(draw.size.rows * 19)
   const svgPath = `${dir}/map.svg`
   const png = `${dir}/map-${n % 2}.png` // two files in turn, so the shown one is never half written
+  const userData = `${dir}/chrome-${n % 2}` // same: a profile locked by one run must not block the next
   await $.fs.write(svgPath, svg(await read($, files), { width, height, at: Date.now(), turn: await read($, turn) }))
   const r = plat === 'win32'
-    ? await $.process.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', SHOT_PS, chrome, png, `${dir}/chrome`, `${width},${height}`, `file:///${svgPath.replace(/\\/g, '/').replace(/^\/?/, '')}`], { timeoutMs: 20_000 })
-    : await $.process.run(['sh', '-c', SHOT_SH, chrome, png, `${dir}/chrome`, `${width},${height}`, `file://${encodeURI(svgPath)}`], { timeoutMs: 20_000 })
+    ? await shotWin($, chrome, png, userData, `${width},${height}`, svgPath)
+    : await $.process.run(['sh', '-c', SHOT_SH, chrome, png, userData, `${width},${height}`, `file://${encodeURI(svgPath)}`], { timeoutMs: 20_000 })
   if (r.exitCode === 0) await update($, frame, () => ({ file: png, n }))
+}
+
+// On Windows the screenshot runs through PowerShell. `-Command` swallows
+// positional arguments (they never reach `$args`), so write the script to a
+// `.ps1` file and invoke it with `-File`, the only mode that passes them
+// through. The script lives in the temp dir, not inside the user-data-dir,
+// so Chrome's profile management never touches it.
+async function shotWin($: EngineInterface, chrome: string, png: string, userData: string, size: string, svgPath: string) {
+  const dir = png.slice(0, png.lastIndexOf('/'))
+  const ps = `${dir}/shot.ps1`
+  await $.fs.write(ps, SHOT_PS)
+  const fileUri = `file:///${svgPath.replace(/\\/g, '/').replace(/^\/?/, '')}`
+  return $.process.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps, chrome, png, userData, size, fileUri], { timeoutMs: 20_000 })
 }
