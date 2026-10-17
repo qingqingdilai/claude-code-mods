@@ -141,7 +141,7 @@ Install it like any mod, restart, and type `/mission` (or `/mission code` to ope
 - 🟠 **Orange** while it writes
 - 🟢 **Green** when done, with one line on what changed
 
-> The Code view also needs macOS, Google Chrome and a terminal that shows images (Ghostty, kitty, iTerm2). The Who view works everywhere.
+> The Code view also needs a headless browser (Google Chrome, or Microsoft Edge on Windows; Chromium works too) and a terminal that shows images (Ghostty, kitty, iTerm2). It runs on macOS, Windows and Linux. The Who view works everywhere.
 
 ## 📚 More
 

@@ -32,8 +32,8 @@ Shows every Claude Code subagent, tool call and touched file in a live pane.
 
 - Press `w` for Who, `c` for Code and `q` to close
 - `/mission code` opens straight to the code map, `/mission who` to the agents
-- Headless Chrome (`/Applications/Google Chrome.app`) draws the code map as an image, in a throwaway profile
-- The Code view is macOS only and needs a terminal that shows images (Ghostty, kitty, iTerm2)
+- A headless browser (Google Chrome, Microsoft Edge on Windows, or Chromium) draws the code map as an image, in a throwaway profile
+- The Code view runs on macOS, Windows and Linux, and needs a terminal that shows images (Ghostty, kitty, iTerm2)
 - A file glows blue while Claude reads it, orange while it edits it, and turns green with a check once changed
 - One Haiku call after each turn writes the line under each changed file
 

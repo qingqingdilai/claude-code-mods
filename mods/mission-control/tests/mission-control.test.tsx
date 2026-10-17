@@ -147,6 +147,8 @@ describe('mission-control', () => {
 
     const band = await $.ui.mount({ plugin: 'mission-control', surface: 'terminal', ...BAND } as any)
     expect(await band.find({ type: 'Text', text: /1\/1 agents · 2 tools · 1 files changed/ })).toBeDefined()
+    // The band now also shows the live tail of the tree, so you watch calls without opening the pane.
+    expect(await band.find({ type: 'Text', text: /edit: auth\/session\.ts/ })).toBeDefined()
     expect(await band.find({ type: 'Text', text: /band below/ })).toBeDefined()
     await band.unmount()
 

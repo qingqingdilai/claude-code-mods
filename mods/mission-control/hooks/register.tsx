@@ -14,6 +14,7 @@ const PANE = 'mission-control'
 const MAX_NODES = 300
 const MAX_FILES = 14
 const BAND_AFTER_MS = 30_000 // the band stays this long after a turn ends
+const BAND_ROWS = 3 // how many live tree lines the band shows above the prompt
 
 // Candidate headless-browser binaries, in order of preference: Chrome first, then Edge.
 // The list depends only on the platform, so it is easy to test; `exists` filters it.
@@ -245,6 +246,7 @@ export const register: Register = on => {
   // The band: one summary line while Claude works, and for a short while after.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const rest = await next(e) // what other mods and Claude Code draw here stays
+    await read($, now) // subscribes the band to the clock, so running lines tick
     const list = await read($, nodes)
     const main = list.find(n => n.kind === 'main')
     const s = summary(list)
@@ -253,6 +255,9 @@ export const register: Register = on => {
     const t = await read($, turn)
     const edited = (await read($, files)).filter(f => f.changedTurn === t).length
     const { Box, Text } = $.ui.resolve(e)
+    // The live tail of the tree: the newest calls, most recent last, so you watch
+    // the work without opening the pane. Done lines dim; running ones hold yellow.
+    const tail = lines(list, Date.now()).slice(-BAND_ROWS)
     return (
       <Box flexDirection="column">
         <Text wrap="truncate-end">
@@ -260,6 +265,14 @@ export const register: Register = on => {
           <Text>{`${s.agents ? `${s.running}/${s.agents} agents · ` : ''}${s.tools} tools${s.failed ? ` · ${s.failed} failed` : ''}${edited ? ` · ${edited} files changed` : ''}`}</Text>
           <Text dimColor>{'  ·  /mission'}</Text>
         </Text>
+        {tail.map(l => (
+          <Text key={l.node.id} wrap="truncate-end">
+            <Text dimColor>{'   ' + l.prefix}</Text>
+            <Text color={l.status === 'running' ? 'yellow' : l.status === 'failed' ? 'red' : undefined} bold={l.node.kind !== 'tool'} dimColor={l.status === 'done' && l.node.kind === 'tool'}>
+              {l.text}
+            </Text>
+          </Text>
+        ))}
         {rest}
       </Box>
     )
