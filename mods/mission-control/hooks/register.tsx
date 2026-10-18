@@ -7,7 +7,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { MapFile, MissionNode } from '../types'
-import { importsOf, svg } from './map'
+import { importsOf, svg, toPosix } from './map'
 import { label, lines, summary } from './tree'
 
 const PANE = 'mission-control'
@@ -17,8 +17,9 @@ const BAND_AFTER_MS = 30_000 // the band stays this long after a turn ends
 const BAND_ROWS = 3 // how many live tree lines the band shows above the prompt
 
 // Candidate headless-browser binaries, in order of preference: Chrome first, then Edge.
-// The list depends only on the platform, so it is easy to test; `exists` filters it.
-export function browserCandidates(platform: NodeJS.Platform): string[] {
+// The list depends on the platform and, on Windows, on the user's LOCALAPPDATA (Chrome
+// installs per-user without admin rights). It stays a pure function so it is easy to test.
+export function browserCandidates(platform: NodeJS.Platform, localAppData?: string | null): string[] {
   if (platform === 'darwin') {
     return [
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -28,8 +29,10 @@ export function browserCandidates(platform: NodeJS.Platform): string[] {
   }
   if (platform === 'win32') {
     const roots = ['C:/Program Files', 'C:/Program Files (x86)']
+    const user = localAppData ? toPosix(localAppData).replace(/\/+$/, '') : ''
     return [
       ...roots.map(r => `${r}/Google/Chrome/Application/chrome.exe`),
+      ...(user ? [`${user}/Google/Chrome/Application/chrome.exe`] : []),
       ...roots.map(r => `${r}/Microsoft/Edge/Application/msedge.exe`),
     ]
   }
@@ -45,7 +48,7 @@ export async function platformOf($: EngineInterface): Promise<'win32' | 'darwin'
 
 // The first candidate that exists; null when no known browser is installed.
 export async function findBrowser($: EngineInterface): Promise<string | null> {
-  for (const c of browserCandidates(await platformOf($))) if (await $.fs.exists(c)) return c
+  for (const c of browserCandidates(await platformOf($), await $.env.get('LOCALAPPDATA'))) if (await $.fs.exists(c)) return c
   return null
 }
 
@@ -132,7 +135,7 @@ export const register: Register = on => {
       const parent = e.agentId && list.some(n => n.id === e.agentId) ? e.agentId : 'main'
       return cap([...list, { id, parent, kind: 'tool', label: text, family, status: 'running', start: Date.now() }])
     })
-    const path = typeof args.file_path === 'string' ? args.file_path : undefined
+    const path = typeof args.file_path === 'string' ? toPosix(args.file_path) : undefined
     if (path) await touch($, path, e.tool === 'Read' ? 'read' : e.tool === 'Write' ? 'write' : e.tool === 'Edit' ? 'edit' : 'search', false)
 
     let failed = true
@@ -369,6 +372,7 @@ const SHOT_PS = [
   '$sw = [System.Diagnostics.Stopwatch]::StartNew()',
   'while ((-not (Test-Path $args[2]) -or (Get-Item $args[2]).Length -eq 0) -and $sw.ElapsedMilliseconds -lt 15000) { Start-Sleep -Milliseconds 100 }',
   'Start-Sleep -Milliseconds 200',
+  'Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }',
   'if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }',
   'if (Test-Path $args[2]) { exit 0 } else { exit 1 }',
 ].join('\r\n')

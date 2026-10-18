@@ -12,9 +12,13 @@ function join(dir: string, rel: string) {
   return parts.join('/')
 }
 
+// Windows hands tool calls with `\` separators; everything past this point works in posix form.
+export const toPosix = (p: string) => p.replace(/\\/g, '/')
+
 // Relative imports in a source file, resolved against its folder, extension stripped.
 export function importsOf(path: string, text: string): string[] {
-  const dir = path.slice(0, path.lastIndexOf('/'))
+  const norm = toPosix(path)
+  const dir = norm.slice(0, norm.lastIndexOf('/'))
   const found = new Set<string>()
   const js = /(?:from\s+|import\s*\(\s*|require\s*\(\s*|import\s+)['"](\.{1,2}\/[^'"]+)['"]/g
   for (const m of text.matchAll(js)) found.add(stripExt(join(dir, m[1] as string)))
@@ -85,8 +89,9 @@ const esc = (s: string) =>
 export type Look = { width: number; height: number; at: number; turn: number }
 
 // The whole picture: boxes per file, arrows per import, a glow on what is being touched now.
-const SANS = `-apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif`
-const MONO = `'SF Mono', Menlo, monospace`
+// Font stacks list what Windows and macOS headless browsers actually ship, in order.
+const SANS = `system-ui, -apple-system, 'Segoe UI', 'SF Pro Text', 'Helvetica Neue', sans-serif`
+const MONO = `'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace`
 const C = {
   bg: '#0d1015', grid: '#1a1f28', card: '#151922', cardLive: '#1b2130', line: '#2a3140', text: '#e8ebf2',
   dim: '#7d8698', faint: '#4b5263', edge: '#3a4252', edgeHot: '#6b7a96',

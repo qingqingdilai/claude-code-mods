@@ -130,6 +130,8 @@ describe('mission-control', () => {
     const out = svg(files, { width: 800, height: 400, at: 99_999, turn: 2 })
     expect(out).toContain('1 changed')
     expect(out).toContain('adds a &amp; b &lt;check&gt;')
+    expect(out).toContain("'Segoe UI'") // fonts a headless browser on Windows actually has
+    expect(out).toContain("'Cascadia Mono'")
     expect(fit('tokens now expire after one hour', 20)).toBe('tokens now expire…')
     const regs = ['/m/merge-gate/hooks/register.tsx', '/m/snake/hooks/register.tsx']
     expect(titleOf(regs[0] as string, regs)).toBe('merge-gate › register.tsx')
@@ -218,7 +220,32 @@ describe('mission-control', () => {
     expect(ps).toBeDefined() // not sh
     expect(runs.some(a => a[0] === 'sh')).toBe(false)
     expect(ps?.join(' ')).toContain('Chrome/Application/chrome.exe') // the Windows Chrome path, via %TEMP%
+    const psScript = Object.values(writes).find((v: string) => v.includes('Start-Process')) ?? ''
+    expect(psScript).toContain('ParentProcessId') // the script must kill Chrome's child tree, like `pkill -P` does on POSIX
     expect(await pane.find({ type: 'Image' })).toBeDefined()
     await pane.unmount()
+  })
+
+  test('Win11: backslash file paths map like posix paths', () => {
+    expect(importsOf('C:\\repo\\src\\pages\\login.tsx', "import { a } from '../auth/session'\nconst b = require('./x.js')")).toEqual(['C:/repo/src/auth/session', 'C:/repo/src/pages/x'])
+    expect(label({ tool: 'Read', file_path: 'C:\\repo\\src\\auth\\session.ts' })).toEqual({ label: 'auth/session.ts', family: 'read' }) // same last-two-segments rule as a posix path
+    expect(titleOf('C:/m/merge-gate/hooks/register.tsx', ['C:/m/merge-gate/hooks/register.tsx', 'C:/m/snake/hooks/register.tsx'])).toBe('merge-gate › register.tsx')
+  })
+
+  test('Win11: browser candidates include a user-level Chrome from LOCALAPPDATA', () => {
+    const withLad = (browserCandidates as (...a: unknown[]) => string[])('win32', 'C:\\Users\\me\\AppData\\Local')
+    expect(withLad).toEqual([
+      'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+      'C:/Users/me/AppData/Local/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    ])
+    expect(browserCandidates('win32')).toEqual([
+      'C:/Program Files/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+      'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    ]) // no env value: exactly the old list
   })
 })

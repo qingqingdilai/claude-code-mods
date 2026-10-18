@@ -1,11 +1,12 @@
 // The "who" view: main, its subagents and their tool calls, as tree lines.
 import type { MissionNode } from '../types'
+import { toPosix } from './map'
 
 // A short label and a family for one tool call.
 export function label(e: Record<string, unknown>): { label: string; family: string } {
   const tool = String(e.tool)
   const s = (k: string) => (typeof e[k] === 'string' ? (e[k] as string) : '')
-  const file = (p: string) => p.split('/').slice(-2).join('/')
+  const file = (p: string) => toPosix(p).split('/').slice(-2).join('/')
   if (tool === 'Bash') return { label: s('description') || s('command').slice(0, 60), family: 'bash' }
   if (tool === 'Edit' || tool === 'Write') return { label: file(s('file_path')), family: 'edit' }
   if (tool === 'Read') return { label: file(s('file_path')), family: 'read' }
